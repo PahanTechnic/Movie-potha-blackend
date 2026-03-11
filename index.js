@@ -136,8 +136,39 @@ tgBot.onText(/\/start(.*)/, async (msg, match) => {
         return handleTVStart(chatId, param);
     }
 
-    return handleMovieStart(chatId, param);
+    // ✅ Smart routing: movie check කරලා, නැතිනම් TV series check කරනවා
+    // Website එකෙන් tv_ prefix නොදැම්මත් work කරනවා
+    return handleSmartStart(chatId, param);
 });
+
+// ═══════════════════════════════════════════════
+// 🎯 SMART START - Movie හෝ TV Series auto-detect
+// ═══════════════════════════════════════════════
+
+async function handleSmartStart(chatId, tmdbId) {
+    try {
+        // First: movie check
+        const movie = await findMovie(tmdbId);
+        if (movie) {
+            return handleMovieStart(chatId, tmdbId);
+        }
+
+        // Second: TV series check
+        const tvSeries = await findTVSeries(tmdbId);
+        if (tvSeries) {
+            console.log(`📺 Auto-detected TV Series for TMDB ID: ${tmdbId}`);
+            return handleTVStart(chatId, `tv_${tmdbId}`);
+        }
+
+        // Neither found
+        return tgBot.sendMessage(chatId,
+            `❌ කණගාටුයි, සොයාගත නොහැක.\n\n🔍 TMDB ID: ${tmdbId}\n\nWebsite එකෙන් නැවත try කරන්න.`
+        );
+    } catch (err) {
+        console.error('❌ handleSmartStart error:', err.message);
+        tgBot.sendMessage(chatId, "❌ දෝෂයක් ඇතිවිය. නැවත try කරන්න.");
+    }
+}
 
 // ═══════════════════════════════════════════════
 // 🎬 MOVIE START HANDLER
