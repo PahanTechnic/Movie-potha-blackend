@@ -5,260 +5,516 @@ const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const tgBot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 
-console.log("✅ Telegram Movie Bot සාර්ථකව ක්‍රියාත්මක වේ...");
+console.log("✅ Telegram Movie Potha Bot සාර්ථකව ක්‍රියාත්මක වේ...");
 
-// ✅ Movie එක සොයාගන්න වැඩිදියුණු කළ function
+// ═══════════════════════════════════════════════
+// 🎬 MOVIE HELPERS
+// ═══════════════════════════════════════════════
+
 async function findMovie(tmdbId) {
     try {
-        console.log(`🔍 Searching for TMDB ID: ${tmdbId}`);
-        
-        // Convert to integer to match database
         const numericId = parseInt(tmdbId);
-        
         const { data, error } = await supabase
             .from('movies')
             .select('*')
             .eq('tmdb_id', numericId)
             .single();
-        
-        if (error) {
-            console.error('❌ Database error:', error);
-            return null;
-        }
-        
-        if (!data) {
-            console.log(`❌ Movie not found with TMDB ID: ${numericId}`);
-            return null;
-        }
-        
-        console.log(`✅ Movie found: ${data.title}`);
-        return data;
+        if (error) { console.error('❌ Movie DB error:', error); return null; }
+        if (data) console.log(`✅ Movie found: ${data.title}`);
+        return data || null;
     } catch (err) {
-        console.error('❌ Error in findMovie:', err);
+        console.error('❌ findMovie error:', err);
         return null;
     }
 }
 
-// 1. /start කමාන්ඩ් එකට Resolution තේරීමේ බටන් යැවීම
+// ═══════════════════════════════════════════════
+// 📺 TV SERIES HELPERS
+// ═══════════════════════════════════════════════
+
+async function findTVSeries(tmdbId) {
+    try {
+        const numericId = parseInt(tmdbId);
+        const { data, error } = await supabase
+            .from('tv_series')
+            .select('*')
+            .eq('tmdb_id', numericId)
+            .single();
+        if (error) { console.error('❌ TV DB error:', error); return null; }
+        if (data) console.log(`✅ TV Series found: ${data.title}`);
+        return data || null;
+    } catch (err) {
+        console.error('❌ findTVSeries error:', err);
+        return null;
+    }
+}
+
+async function getTVSeasons(tvSeriesId) {
+    try {
+        const { data, error } = await supabase
+            .from('seasons')
+            .select('*')
+            .eq('tv_series_id', tvSeriesId)
+            .order('season_number', { ascending: true });
+        if (error) { console.error('❌ Seasons DB error:', error); return []; }
+        return data || [];
+    } catch (err) {
+        console.error('❌ getTVSeasons error:', err);
+        return [];
+    }
+}
+
+async function getTVEpisodes(seasonId) {
+    try {
+        const { data, error } = await supabase
+            .from('episodes')
+            .select('*')
+            .eq('season_id', seasonId)
+            .order('episode_number', { ascending: true });
+        if (error) { console.error('❌ Episodes DB error:', error); return []; }
+        return data || [];
+    } catch (err) {
+        console.error('❌ getTVEpisodes error:', err);
+        return [];
+    }
+}
+
+// ═══════════════════════════════════════════════
+// 💾 USER SESSION - Season/Episode selection track කරන්න
+// ═══════════════════════════════════════════════
+// Format: { chatId: { type: 'tv', tmdbId, tvId, slug, seasons, selectedSeasonId, episodes } }
+const userSessions = {};
+
+// ═══════════════════════════════════════════════
+// 🚀 /start COMMAND
+// ═══════════════════════════════════════════════
+
 tgBot.onText(/\/start(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const param = match[1].trim(); // Remove whitespace
-    
-    // ✅ වැඩිදියුණු කළ parameter handling
+    const param = match[1].trim();
+
+    // Welcome message - param නැතිනම්
     if (!param || param === '') {
-        return tgBot.sendMessage(
-            chatId, 
-            "👋 Movie Potha Bot වෙත සාදරයෙන් පිළිගනිමු!\n\n" +
-            "🎬 Movie එකක් බාගත කිරීමට:\n" +
-            "1. Website එකෙන් movie එකක් තෝරන්න\n" +
-            "2. 'Get on Telegram' බටන් එක click කරන්න\n" +
-            "3. ඔබට අවශ්‍ය quality එක තෝරන්න\n\n" +
-            "💡 Website: moviepotha.lk"
+        return tgBot.sendMessage(chatId,
+            "👋 *Movie Potha Bot* වෙත සාදරයෙන් පිළිගනිමු!\n\n" +
+            "🎬 *Movies:*\n" +
+            "Website එකෙන් movie download → 'Get on Telegram' click\n\n" +
+            "📺 *TV Series:*\n" +
+            "Website එකෙන් TV series → 'Get on Telegram' click\n" +
+            "Season → Episode → Quality තෝරන්න\n\n" +
+            "💡 Website: moviepotha.lk",
+            { parse_mode: 'Markdown' }
         );
     }
 
-    const tmdbId = param;
+    // TV Series param format: "tv_<tmdbId>" හෝ "tv_<tmdbId>_s<season>_e<episode>"
+    if (param.startsWith('tv_')) {
+        return handleTVStart(chatId, param);
+    }
 
+    // Movie param (numeric tmdbId)
+    return handleMovieStart(chatId, param);
+});
+
+// ═══════════════════════════════════════════════
+// 🎬 MOVIE START HANDLER
+// ═══════════════════════════════════════════════
+
+async function handleMovieStart(chatId, tmdbId) {
     try {
         const movie = await findMovie(tmdbId);
-        
+
         if (!movie) {
-            return tgBot.sendMessage(
-                chatId, 
+            return tgBot.sendMessage(chatId,
                 `❌ කණගාටුයි, මූවී එක සොයාගත නොහැක.\n\n` +
                 `🔍 TMDB ID: ${tmdbId}\n\n` +
-                `කරුණාකර website එකෙන් නැවත try කරන්න.`
+                `Website එකෙන් නැවත try කරන්න.`
             );
         }
 
-        // ✅ බටන් සෑදීම (තිබෙන ඒවා පමණක් පෙන්වීමට)
+        // Available quality buttons
         let keyboard = [];
-        
-        if (movie.tg_file_id_1080 || movie.video_url_1080) {
-            keyboard.push([{ 
-                text: '🎬 1080p (FHD) - Full HD', 
-                callback_data: `${tmdbId}_1080` 
-            }]);
-        }
-        
-        if (movie.tg_file_id_720 || movie.video_url_720) {
-            keyboard.push([{ 
-                text: '🎬 720p (HD) - High Definition', 
-                callback_data: `${tmdbId}_720` 
-            }]);
-        }
-        
-        if (movie.tg_file_id_360 || movie.video_url_360) {
-            keyboard.push([{ 
-                text: '🎬 360p (SD) - Standard', 
-                callback_data: `${tmdbId}_360` 
-            }]);
-        }
+        if (movie.tg_file_id_1080 || movie.video_url_1080)
+            keyboard.push([{ text: '🔥 1080p - Full HD', callback_data: `movie_${tmdbId}_1080` }]);
+        if (movie.tg_file_id_720 || movie.video_url_720)
+            keyboard.push([{ text: '⚡ 720p - HD', callback_data: `movie_${tmdbId}_720` }]);
+        if (movie.tg_file_id_360 || movie.video_url_360)
+            keyboard.push([{ text: '📱 360p - SD', callback_data: `movie_${tmdbId}_360` }]);
+        if (keyboard.length === 0 && movie.video_url)
+            keyboard.push([{ text: '🎬 Download - Full Quality', callback_data: `movie_${tmdbId}_default` }]);
 
         if (keyboard.length === 0) {
-            return tgBot.sendMessage(
-                chatId, 
-                `❌ කණගාටුයි!\n\n` +
-                `🎥 *${movie.title}*\n\n` +
-                `මෙම මූවී එක සඳහා තවම video files upload කර නැත.\n` +
-                `පසුව නැවත try කරන්න.`,
+            return tgBot.sendMessage(chatId,
+                `❌ කණගාටුයි!\n\n🎥 *${movie.title}*\n\nVideo files තවම upload කර නැත.\nපසුව නැවත try කරන්න.`,
                 { parse_mode: 'Markdown' }
             );
         }
 
-        const opts = {
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: keyboard }
+        const caption =
+            `🎬 *${movie.title}*${movie.release_date ? ` (${new Date(movie.release_date).getFullYear()})` : ''}\n\n` +
+            `⭐ Rating: ${movie.rating || 'N/A'}\n` +
+            `⏱ Duration: ${movie.duration ? movie.duration + ' mins' : 'N/A'}\n\n` +
+            `${movie.overview ? movie.overview.substring(0, 200) + '...' : ''}\n\n` +
+            `👇 Quality එක තෝරන්න:`;
+
+        const opts = { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } };
+
+        if (movie.poster_url) {
+            await tgBot.sendPhoto(chatId, movie.poster_url, { caption, ...opts });
+        } else {
+            await tgBot.sendMessage(chatId, caption, opts);
+        }
+
+    } catch (err) {
+        console.error('❌ handleMovieStart error:', err);
+        tgBot.sendMessage(chatId, "❌ දෝෂයක් ඇතිවිය. නැවත try කරන්න.");
+    }
+}
+
+// ═══════════════════════════════════════════════
+// 📺 TV SERIES START HANDLER
+// ═══════════════════════════════════════════════
+
+async function handleTVStart(chatId, param) {
+    try {
+        // param: "tv_<tmdbId>"
+        const parts = param.split('_');
+        const tmdbId = parts[1];
+
+        const tvSeries = await findTVSeries(tmdbId);
+
+        if (!tvSeries) {
+            return tgBot.sendMessage(chatId,
+                `❌ TV Series සොයාගත නොහැක.\n\nWebsite එකෙන් නැවත try කරන්න.`
+            );
+        }
+
+        const seasons = await getTVSeasons(tvSeries.id);
+
+        if (seasons.length === 0) {
+            return tgBot.sendMessage(chatId,
+                `❌ *${tvSeries.title}*\n\nSeasons තවම add කර නැත.`,
+                { parse_mode: 'Markdown' }
+            );
+        }
+
+        // Session save
+        userSessions[chatId] = {
+            type: 'tv',
+            tmdbId,
+            tvId: tvSeries.id,
+            tvTitle: tvSeries.title,
+            tvPoster: tvSeries.poster_url,
+            tvRating: tvSeries.rating,
+            seasons,
+            selectedSeasonId: null,
+            episodes: []
         };
 
-        // ✅ Poster එක තිබුනොත් photo එකත් එක්ක යවනවා
-        if (movie.poster_url) {
-            await tgBot.sendPhoto(chatId, movie.poster_url, {
-                caption: `🎥 *${movie.title}*${movie.release_date ? ` (${new Date(movie.release_date).getFullYear()})` : ''}\n\n` +
-                         `⭐ Rating: ${movie.rating || 'N/A'}\n` +
-                         `⏱ Duration: ${movie.duration ? movie.duration + ' mins' : 'N/A'}\n\n` +
-                         `${movie.overview ? movie.overview.substring(0, 200) + '...' : ''}\n\n` +
-                         `👇 කරුණාකර ඔබට අවශ්‍ය Resolution එක තෝරන්න:`,
-                parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: keyboard }
-            });
+        // Season selection keyboard
+        const keyboard = seasons.map(s => ([{
+            text: `📺 Season ${s.season_number}${s.name && s.name !== `Season ${s.season_number}` ? ` - ${s.name}` : ''}`,
+            callback_data: `tv_season_${s.id}`
+        }]));
+
+        const caption =
+            `📺 *${tvSeries.title}*\n\n` +
+            `⭐ Rating: ${tvSeries.rating || 'N/A'}\n` +
+            `🎬 Seasons: ${seasons.length}\n\n` +
+            `${tvSeries.overview ? tvSeries.overview.substring(0, 150) + '...' : ''}\n\n` +
+            `👇 Season එකක් තෝරන්න:`;
+
+        const opts = { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } };
+
+        if (tvSeries.poster_url) {
+            await tgBot.sendPhoto(chatId, tvSeries.poster_url, { caption, ...opts });
         } else {
-            await tgBot.sendMessage(
-                chatId, 
-                `🎥 *${movie.title}*${movie.release_date ? ` (${new Date(movie.release_date).getFullYear()})` : ''}\n\n` +
-                `⭐ Rating: ${movie.rating || 'N/A'}\n` +
-                `⏱ Duration: ${movie.duration ? movie.duration + ' mins' : 'N/A'}\n\n` +
-                `Movie Potha වෙතින් උපසිරැසි සමඟින්.\n\n` +
-                `👇 කරුණාකර ඔබට අවශ්‍ය Resolution එක තෝරන්න:`, 
-                opts
-            );
+            await tgBot.sendMessage(chatId, caption, opts);
         }
 
     } catch (err) {
-        console.error('❌ Error in /start handler:', err);
-        tgBot.sendMessage(
-            chatId, 
-            "❌ පද්ධතියේ දෝෂයක් ඇතිවිය.\nකරුණාකර පසුව නැවත try කරන්න."
-        );
+        console.error('❌ handleTVStart error:', err);
+        tgBot.sendMessage(chatId, "❌ දෝෂයක් ඇතිවිය. නැවත try කරන්න.");
     }
-});
+}
 
-// 2. යූසර් බටන් එකක් ක්ලික් කළ විට ෆයිල් එක යැවීම
+// ═══════════════════════════════════════════════
+// 🔘 CALLBACK QUERY HANDLER
+// ═══════════════════════════════════════════════
+
 tgBot.on('callback_query', async (callbackQuery) => {
     const message = callbackQuery.message;
-    const data = callbackQuery.data; // උදා: "748783_720"
-    
+    const chatId = message.chat.id;
+    const data = callbackQuery.data;
+
     try {
-        const [tmdbId, quality] = data.split('_'); // tmdbId සහ quality එක වෙන් කරගන්නවා
+        // ── MOVIE QUALITY SELECTED ──────────────────────
+        if (data.startsWith('movie_')) {
+            const parts = data.split('_'); // movie_<tmdbId>_<quality>
+            const tmdbId = parts[1];
+            const quality = parts[2]; // 1080 | 720 | 360 | default
 
-        const movie = await findMovie(tmdbId);
-        
-        if (!movie) {
-            return tgBot.answerCallbackQuery(callbackQuery.id, { 
-                text: "❌ Movie එක සොයාගත නොහැක", 
-                show_alert: true 
+            await tgBot.answerCallbackQuery(callbackQuery.id, {
+                text: `🎬 ${quality === 'default' ? 'Full Quality' : quality + 'p'} ෆයිල් එක සූදානම් කරමින්...`
+            });
+
+            return sendMovieFile(chatId, tmdbId, quality);
+        }
+
+        // ── TV: SEASON SELECTED ──────────────────────────
+        if (data.startsWith('tv_season_')) {
+            const seasonId = data.replace('tv_season_', '');
+            const session = userSessions[chatId];
+
+            if (!session) {
+                await tgBot.answerCallbackQuery(callbackQuery.id, { text: "⚠️ Session expired. නැවත /start try කරන්න.", show_alert: true });
+                return;
+            }
+
+            await tgBot.answerCallbackQuery(callbackQuery.id, { text: "📋 Episodes load කරමින்..." });
+
+            const episodes = await getTVEpisodes(seasonId);
+            const selectedSeason = session.seasons.find(s => s.id === seasonId);
+
+            if (episodes.length === 0) {
+                return tgBot.sendMessage(chatId,
+                    `❌ Season ${selectedSeason?.season_number || ''} - Episodes තවම add කර නැත.`
+                );
+            }
+
+            // Update session
+            session.selectedSeasonId = seasonId;
+            session.selectedSeason = selectedSeason;
+            session.episodes = episodes;
+
+            // Episode keyboard - max 10 per row group for readability
+            const keyboard = episodes.map(ep => {
+                const hasVideo = ep.video_url_1080 || ep.video_url_720 || ep.video_url_360 || ep.video_url;
+                return [{
+                    text: `${hasVideo ? '✅' : '❌'} E${ep.episode_number}: ${ep.title.substring(0, 25)}${ep.title.length > 25 ? '...' : ''}`,
+                    callback_data: `tv_episode_${ep.id}`
+                }];
+            });
+
+            // Back button
+            keyboard.push([{ text: '🔙 Seasons වෙත ආපසු', callback_data: `tv_back_seasons_${session.tmdbId}` }]);
+
+            await tgBot.sendMessage(chatId,
+                `📺 *${session.tvTitle}*\n` +
+                `📂 *Season ${selectedSeason?.season_number}*\n\n` +
+                `Episodes ${episodes.length}ක් ඇත.\n` +
+                `✅ = Download available  ❌ = Not available\n\n` +
+                `👇 Episode එකක් තෝරන්න:`,
+                { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
+            );
+            return;
+        }
+
+        // ── TV: EPISODE SELECTED ─────────────────────────
+        if (data.startsWith('tv_episode_')) {
+            const episodeId = data.replace('tv_episode_', '');
+            const session = userSessions[chatId];
+
+            if (!session) {
+                await tgBot.answerCallbackQuery(callbackQuery.id, { text: "⚠️ Session expired. නැවත /start try කරන්න.", show_alert: true });
+                return;
+            }
+
+            const episode = session.episodes.find(e => e.id === episodeId);
+            if (!episode) {
+                await tgBot.answerCallbackQuery(callbackQuery.id, { text: "❌ Episode සොයාගත නොහැක.", show_alert: true });
+                return;
+            }
+
+            await tgBot.answerCallbackQuery(callbackQuery.id, { text: `📋 ${episode.title} - Quality options...` });
+
+            // Store selected episode in session
+            session.selectedEpisode = episode;
+
+            // Quality keyboard - only show available qualities
+            let keyboard = [];
+            if (episode.tg_file_id_1080 || episode.video_url_1080)
+                keyboard.push([{ text: '🔥 1080p - Full HD', callback_data: `tv_quality_${episodeId}_1080` }]);
+            if (episode.tg_file_id_720 || episode.video_url_720)
+                keyboard.push([{ text: '⚡ 720p - HD', callback_data: `tv_quality_${episodeId}_720` }]);
+            if (episode.tg_file_id_360 || episode.video_url_360)
+                keyboard.push([{ text: '📱 360p - SD', callback_data: `tv_quality_${episodeId}_360` }]);
+            if (keyboard.length === 0 && episode.video_url)
+                keyboard.push([{ text: '🎬 Download - Full Quality', callback_data: `tv_quality_${episodeId}_default` }]);
+
+            // Back button
+            keyboard.push([{ text: '🔙 Episodes වෙත ආපසු', callback_data: `tv_back_episodes_${session.selectedSeasonId}` }]);
+
+            if (keyboard.length <= 1) {
+                // Only back button - no video available
+                return tgBot.sendMessage(chatId,
+                    `❌ *E${episode.episode_number}: ${episode.title}*\n\nVideo files තවම upload කර නැත.`,
+                    { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
+                );
+            }
+
+            await tgBot.sendMessage(chatId,
+                `📺 *${session.tvTitle}*\n` +
+                `📂 Season ${session.selectedSeason?.season_number} › E${episode.episode_number}\n\n` +
+                `🎬 *${episode.title}*\n` +
+                `${episode.duration ? `⏱ ${episode.duration} mins\n` : ''}` +
+                `${episode.overview ? episode.overview.substring(0, 150) + '...\n' : ''}\n` +
+                `👇 Quality එක තෝරන්න:`,
+                { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
+            );
+            return;
+        }
+
+        // ── TV: QUALITY SELECTED ─────────────────────────
+        if (data.startsWith('tv_quality_')) {
+            // format: tv_quality_<episodeId>_<quality>
+            const withoutPrefix = data.replace('tv_quality_', '');
+            const lastUnderscore = withoutPrefix.lastIndexOf('_');
+            const episodeId = withoutPrefix.substring(0, lastUnderscore);
+            const quality = withoutPrefix.substring(lastUnderscore + 1);
+
+            const session = userSessions[chatId];
+            const episode = session?.selectedEpisode;
+
+            if (!episode) {
+                await tgBot.answerCallbackQuery(callbackQuery.id, { text: "❌ Session expired.", show_alert: true });
+                return;
+            }
+
+            await tgBot.answerCallbackQuery(callbackQuery.id, {
+                text: `📥 ${quality === 'default' ? 'Full Quality' : quality + 'p'} ෆයිල් එක සූදානම් කරමින்...`
+            });
+
+            return sendTVEpisodeFile(chatId, episode, quality, session);
+        }
+
+        // ── TV: BACK TO SEASONS ──────────────────────────
+        if (data.startsWith('tv_back_seasons_')) {
+            const tmdbId = data.replace('tv_back_seasons_', '');
+            await tgBot.answerCallbackQuery(callbackQuery.id, { text: "🔙 Seasons..." });
+            return handleTVStart(chatId, `tv_${tmdbId}`);
+        }
+
+        // ── TV: BACK TO EPISODES ─────────────────────────
+        if (data.startsWith('tv_back_episodes_')) {
+            const seasonId = data.replace('tv_back_episodes_', '');
+            await tgBot.answerCallbackQuery(callbackQuery.id, { text: "🔙 Episodes..." });
+            // Re-trigger season selection
+            return tgBot.emit('callback_query', {
+                ...callbackQuery,
+                data: `tv_season_${seasonId}`,
+                message
             });
         }
 
-        // අදාළ Quality එකට හරියන ID එක සහ URL එක තෝරාගැනීම
-        let fileId = movie[`tg_file_id_${quality}`];
-        let fileUrl = movie[`video_url_${quality}`];
-
-        console.log(`📤 Sending ${quality}p for: ${movie.title}`);
-        console.log(`File ID: ${fileId}`);
-        console.log(`File URL: ${fileUrl}`);
-
-        // Telegram Loading එක අයින් කිරීම
-        await tgBot.answerCallbackQuery(callbackQuery.id, { 
-            text: `${quality}p ෆයිල් එක යවමින් පවතී...` 
-        });
-
-        // ✅ File ID තිබුනාම video එක send කරනවා
-        if (fileId && fileId.trim() !== '') {
-            await tgBot.sendVideo(message.chat.id, fileId, {
-                caption: `🎥 *${movie.title}* (${quality}p)\n\n` +
-                         `📥 Movie Potha වෙතින්\n` +
-                         `⭐ Rating: ${movie.rating || 'N/A'}\n` +
-                         `⏱ Duration: ${movie.duration ? movie.duration + ' mins' : 'N/A'}`,
-                parse_mode: 'Markdown',
-                supports_streaming: true
-            });
-            
-            console.log(`✅ Video sent successfully (${quality}p)`);
-        } 
-        // ✅ File ID නැත්නම් URL එක send කරනවා
-        else if (fileUrl && fileUrl.trim() !== '') {
-            await tgBot.sendMessage(message.chat.id, 
-                `🎥 *${movie.title}* (${quality}p)\n\n` +
-                `📥 කරුණාකර පහත ලින්ක් එකෙන් බාගන්න:\n\n` +
-                `🔗 ${fileUrl}\n\n` +
-                `⭐ Rating: ${movie.rating || 'N/A'}\n` +
-                `⏱ Duration: ${movie.duration ? movie.duration + ' mins' : 'N/A'}`,
-                {
-                    parse_mode: 'Markdown',
-                    disable_web_page_preview: false,
-                    reply_markup: {
-                        inline_keyboard: [[
-                            { text: '📥 Download', url: fileUrl }
-                        ]]
-                    }
-                }
-            );
-            
-            console.log(`✅ URL sent successfully (${quality}p)`);
-        } 
-        // ✅ දෙකම නැත්නම් error එකක්
-        else {
-            await tgBot.sendMessage(message.chat.id, 
-                `❌ කණගාටුයි!\n\n` +
-                `${quality}p quality එක සඳහා file එක තවම upload කර නැත.\n` +
-                `වෙනත් quality එකක් try කරන්න.`
-            );
-            
-            console.log(`❌ No file available for ${quality}p`);
-        }
-        
     } catch (err) {
-        console.error('❌ Error in callback_query handler:', err);
-        
-        tgBot.answerCallbackQuery(callbackQuery.id, { 
-            text: "❌ දෝෂයක් ඇතිවිය", 
-            show_alert: true 
-        });
-        
-        tgBot.sendMessage(message.chat.id, 
-            "❌ ෆයිල් එක යැවීමේදී දෝෂයක් ඇතිවිය.\nකරුණාකර පසුව නැවත try කරන්න."
-        );
+        console.error('❌ callback_query error:', err);
+        tgBot.answerCallbackQuery(callbackQuery.id, { text: "❌ දෝෂයක් ඇතිවිය", show_alert: true });
+        tgBot.sendMessage(chatId, "❌ ෆයිල් එක යැවීමේදී දෝෂයක් ඇතිවිය.\nකරුණාකර පසුව නැවත try කරන්න.");
     }
 });
 
-// ✅ Helper - Video එකක් forward කළාම File ID එක දෙනවා
+// ═══════════════════════════════════════════════
+// 📤 FILE SENDERS
+// ═══════════════════════════════════════════════
+
+async function sendMovieFile(chatId, tmdbId, quality) {
+    const movie = await findMovie(tmdbId);
+    if (!movie) return tgBot.sendMessage(chatId, "❌ Movie සොයාගත නොහැක.");
+
+    const fileId = movie[`tg_file_id_${quality}`];
+    const fileUrl = quality === 'default' ? movie.video_url : movie[`video_url_${quality}`];
+    const qualityLabel = quality === 'default' ? 'Full Quality' : `${quality}p`;
+
+    const caption =
+        `🎬 *${movie.title}* (${qualityLabel})\n\n` +
+        `📥 Movie Potha වෙතින්\n` +
+        `⭐ Rating: ${movie.rating || 'N/A'}\n` +
+        `⏱ Duration: ${movie.duration ? movie.duration + ' mins' : 'N/A'}`;
+
+    return sendFileOrUrl(chatId, fileId, fileUrl, caption, qualityLabel);
+}
+
+async function sendTVEpisodeFile(chatId, episode, quality, session) {
+    const fileId = episode[`tg_file_id_${quality}`];
+    const fileUrl = quality === 'default' ? episode.video_url : episode[`video_url_${quality}`];
+    const qualityLabel = quality === 'default' ? 'Full Quality' : `${quality}p`;
+
+    const caption =
+        `📺 *${session.tvTitle}*\n` +
+        `Season ${session.selectedSeason?.season_number} › E${episode.episode_number} (${qualityLabel})\n\n` +
+        `🎬 *${episode.title}*\n` +
+        `📥 Movie Potha වෙතින්\n` +
+        `⭐ Rating: ${session.tvRating || 'N/A'}`;
+
+    return sendFileOrUrl(chatId, fileId, fileUrl, caption, qualityLabel);
+}
+
+async function sendFileOrUrl(chatId, fileId, fileUrl, caption, qualityLabel) {
+    if (fileId && fileId.trim() !== '') {
+        // Telegram File ID via send video
+        await tgBot.sendVideo(chatId, fileId, {
+            caption,
+            parse_mode: 'Markdown',
+            supports_streaming: true
+        });
+        console.log(`✅ Video sent via File ID (${qualityLabel})`);
+
+    } else if (fileUrl && fileUrl.trim() !== '') {
+        // URL link send
+        await tgBot.sendMessage(chatId,
+            `${caption}\n\n📥 කරුණාකර පහත ලින්ක් එකෙන් බාගන්න:`,
+            {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [[{ text: `📥 Download ${qualityLabel}`, url: fileUrl }]]
+                }
+            }
+        );
+        console.log(`✅ URL sent (${qualityLabel})`);
+
+    } else {
+        await tgBot.sendMessage(chatId,
+            `❌ ${qualityLabel} quality සඳහා file එක තවම upload කර නැත.\nවෙනත් quality එකක් try කරන්න.`
+        );
+        console.log(`❌ No file for ${qualityLabel}`);
+    }
+}
+
+// ═══════════════════════════════════════════════
+// 📋 FILE ID EXTRACTOR (Video forward කළාම)
+// ═══════════════════════════════════════════════
+
 tgBot.on('message', (msg) => {
-    // /start command එක ignore කරනවා
     if (msg.text && msg.text.startsWith('/start')) return;
-    
-    // Video හෝ Document (video) එකක් තිබුනාම File ID එක send කරනවා
-    const video = msg.video || (msg.document && msg.document.mime_type && msg.document.mime_type.includes('video') ? msg.document : null);
-    
+
+    const video = msg.video ||
+        (msg.document?.mime_type?.includes('video') ? msg.document : null);
+
     if (video) {
-        const fileSize = (video.file_size / (1024 * 1024)).toFixed(2); // MB එකකට convert කරනවා
-        
-        tgBot.sendMessage(msg.chat.id, 
+        const fileSize = (video.file_size / (1024 * 1024)).toFixed(2);
+        tgBot.sendMessage(msg.chat.id,
             `✅ *Video File ID ලැබුණා!*\n\n` +
             `📋 File ID:\n\`${video.file_id}\`\n\n` +
             `📦 Size: ${fileSize} MB\n` +
             `⏱ Duration: ${video.duration ? Math.floor(video.duration / 60) + ' mins' : 'N/A'}\n\n` +
-            `💡 මේ ID එක Admin Panel එකේ Telegram File ID field එකට copy කරන්න.`,
+            `💡 Admin Panel → Telegram File ID field එකට copy කරන්න.`,
             { parse_mode: 'Markdown' }
         );
-        
-        console.log(`📋 File ID extracted: ${video.file_id}`);
+        console.log(`📋 File ID: ${video.file_id}`);
     }
 });
 
-// ✅ Error handling
+// ═══════════════════════════════════════════════
+// ⚠️ ERROR HANDLING
+// ═══════════════════════════════════════════════
+
 tgBot.on('polling_error', (error) => {
     console.error('❌ Polling error:', error);
 });
 
-console.log("🤖 Bot is ready and listening for messages...");
+process.on('unhandledRejection', (reason) => {
+    console.error('❌ Unhandled Rejection:', reason);
+});
+
+console.log("🤖 Movie Potha Bot ready! Movies + TV Series support enabled.");
